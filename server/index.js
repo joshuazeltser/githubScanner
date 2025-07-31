@@ -4,8 +4,8 @@ const { startStandaloneServer } = require('@apollo/server/standalone');
 const { typeDefs } = require('./schema');
 const async = require('async');
 
-const GITHUB_TOKEN = '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';
-const GITHUB_USERNAME = 'joshuazeltser';
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const GITHUB_USERNAME = process.env.GITHUB_USERNAME;
 const GITHUB_API_URL = 'https://api.github.com/graphql';
 
 // Rate limiting queue with max 2 concurrent operations
