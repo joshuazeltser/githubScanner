@@ -1,4 +1,3 @@
-// index.js (CommonJS style)
 const { ApolloServer } = require('@apollo/server');
 const { startStandaloneServer } = require('@apollo/server/standalone');
 const { typeDefs } = require('./schema');
@@ -43,7 +42,7 @@ const listRepositories = async () => {
     const query = `
         query {
             user(login: "${GITHUB_USERNAME}") {
-                repositories(first: 10) {
+                repositories(first: 100) {
                     nodes {
                         name
                         diskUsage
@@ -102,46 +101,26 @@ async function fetchRepoDetailsInternal(owner, repoName) {
             }
         `;
 
+    let ymlContent;
     try {
-        const data = await githubGraphQLRequest(query, { owner, name: repoName });
+        const data = await githubGraphQLRequest(query, {owner, name: repoName});
         const repo = data.repository;
 
         if (!repo) {
             throw new Error(`Repository ${owner}/${repoName} not found`);
         }
 
-        // Find a .yml or .yaml file if available (from root directory)
-        const ymlFile = repo.object?.entries?.find(
-            (entry) => entry.extension === '.yml' || entry.extension === '.yaml' ||
-                entry.name.endsWith('.yml') || entry.name.endsWith('.yaml')
-        );
-
-        let ymlContent = '';
-        if (ymlFile) {
-            try {
-                const rawUrl = `https://raw.githubusercontent.com/${owner}/${repoName}/HEAD/${ymlFile.name}`;
-                const res = await fetch(rawUrl, {
-                    headers: {
-                        'Authorization': `token ${GITHUB_TOKEN}`,
-                        'User-Agent': 'Apollo-GraphQL-Server'
-                    }
-                });
-
-                if (res.ok) {
-                    ymlContent = await res.text();
-                } else {
-                    ymlContent = 'Unable to fetch YML file - access denied or file not found';
-                }
-            } catch (error) {
-                console.error('Error fetching YML file:', error);
-                ymlContent = 'Unable to fetch YML file';
-            }
-        } else {
-            ymlContent = 'No YML file found in repository root';
+        // Find any YAML file in the entire repository using search
+        try {
+            ymlContent = await getOneYamlFile(owner, repoName)
+        } catch (error) {
+            console.info('Error fetching YML file:', error);
+            ymlContent = 'Unable to fetch YML file';
         }
 
-        // Get total file count recursively
-        // const totalFiles = await getTotalFileCount(owner, repoName);
+
+        // Get total file count using search
+        const totalFiles = await getTotalFileCountWithREST(owner, repoName);
 
         // Fetch active webhooks using REST API (GraphQL doesn't expose webhooks)
         let activeWebhooks = [];
@@ -170,7 +149,7 @@ async function fetchRepoDetailsInternal(owner, repoName) {
             size: repo.diskUsage ?? 0,
             owner: repo.owner.login,
             isPrivate: repo.isPrivate,
-            // numberOfFiles: totalFiles,
+            numberOfFiles: totalFiles,
             ymlContent,
             activeWebhooks
         };
@@ -180,55 +159,96 @@ async function fetchRepoDetailsInternal(owner, repoName) {
     }
 }
 
-// Recursively count all files in the repository
-async function getTotalFileCount(owner, repoName, path = '') {
-    const query = `
-        query GetTreeContents($owner: String!, $name: String!, $expression: String!) {
-            repository(owner: $owner, name: $name) {
-                object(expression: $expression) {
-                    ... on Tree {
-                        entries {
-                            name
-                            type
-                            path
-                        }
-                    }
-                }
-            }
-        }
-    `;
+async function getOneYamlFile(owner, repoName) {
+    const treeUrl = `https://api.github.com/repos/${owner}/${repoName}/git/trees/HEAD?recursive=1`;
 
     try {
-        const expression = path ? `HEAD:${path}` : 'HEAD:';
-        const data = await githubGraphQLRequest(query, {
-            owner,
-            name: repoName,
-            expression
+        const res = await fetch(treeUrl, {
+            headers: {
+                'Authorization': `token ${GITHUB_TOKEN}`,
+                'User-Agent': 'Apollo-GraphQL-Server',
+                'Accept': 'application/vnd.github.v3+json'
+            }
         });
 
-        const entries = data.repository?.object?.entries || [];
-        let fileCount = 0;
-
-        // Count files and recursively traverse directories
-        for (const entry of entries) {
-            if (entry.type === 'blob') {
-                // It's a file
-                fileCount++;
-            } else if (entry.type === 'tree') {
-                // It's a directory, recursively count files in it
-                const subPath = path ? `${path}/${entry.name}` : entry.name;
-                const subCount = await getTotalFileCount(owner, repoName, subPath);
-                fileCount += subCount;
-            }
+        if (!res.ok) {
+            throw new Error(`Failed to fetch repo tree: ${res.status}`);
         }
 
+        const data = await res.json();
+        const tree = data.tree || [];
+
+        // Find first YAML file
+        const yamlFile = tree.find(entry =>
+            entry.type === 'blob' &&
+            (entry.path.endsWith('.yml') || entry.path.endsWith('.yaml'))
+        );
+
+        if (!yamlFile) {
+            return 'No YAML file found in repository'
+
+        }
+
+        // Fetch raw content
+        const rawUrl = `https://raw.githubusercontent.com/${owner}/${repoName}/HEAD/${yamlFile.path}`;
+
+        const contentRes = await fetch(rawUrl, {
+            headers: {
+                'Authorization': `token ${GITHUB_TOKEN}`,
+                'User-Agent': 'Apollo-GraphQL-Server'
+            }
+        });
+
+        if (!contentRes.ok) {
+            return {
+                path: yamlFile.path,
+                content: `Unable to fetch YML file - status ${contentRes.status}`
+            };
+        }
+
+        const content = await contentRes.text();
+
+        return content;
+    } catch (error) {
+        console.error('Error retrieving YAML file:', error);
+        return {
+            path: null,
+            content: 'Error fetching YAML file'
+        };
+    }
+}
+
+
+
+async function getTotalFileCountWithREST(owner, repoName) {
+    const url = `https://api.github.com/repos/${owner}/${repoName}/git/trees/HEAD?recursive=1`;
+
+    try {
+        const res = await fetch(url, {
+            headers: {
+                'Authorization': `token ${GITHUB_TOKEN}`,
+                'User-Agent': 'Apollo-GraphQL-Server',
+                'Accept': 'application/vnd.github.v3+json'
+            }
+        });
+
+        if (!res.ok) {
+            throw new Error(`Failed to fetch file tree: ${res.status}`);
+        }
+
+        const data = await res.json();
+        if (!data.tree) return 0;
+
+        const fileCount = data.tree.filter(entry => entry.type === 'blob').length;
         return fileCount;
     } catch (error) {
-        console.error(`Error counting files in ${path || 'root'}:`, error);
-        // Return 0 if we can't access a directory (permissions, etc.)
+        console.error('Error fetching total file count (REST):', error);
         return 0;
     }
 }
+
+
+
 
 const githubGraphQLRequest = async (query, variables = {}) => {
     try {
