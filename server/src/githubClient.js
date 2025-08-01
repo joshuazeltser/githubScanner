@@ -42,7 +42,7 @@ const repoDetailsQueue = queue(async (task) => {
     return await fetchRepoDetailsInternal(task.owner, task.repoName);
 }, MAX_CONCURRENT_FETCH_DETAILS);
 
-async function fetchRepoDetails(owner, repoName) {
+const fetchRepoDetails = (owner, repoName) => {
     // Use async queue for rate limiting
     return new Promise((resolve, reject) => {
         repoDetailsQueue.push({ owner, repoName }, (error, result) => {
@@ -52,80 +52,74 @@ async function fetchRepoDetails(owner, repoName) {
     });
 }
 
-async function fetchRepoDetailsInternal(owner, repoName) {
+const fetchRepoDetailsInternal = async (owner, repoName) => {
     const query = `
-            query GetRepoDetails($owner: String!, $name: String!) {
-                repository(owner: $owner, name: $name) {
-                    name
-                    diskUsage
-                    isPrivate
-                    owner {
-                        login
-                    }
-                    object(expression: "HEAD:") {
-                        ... on Tree {
-                            entries {
-                                name
-                                type
-                                extension
-                            }
+        query GetRepoDetails($owner: String!, $name: String!) {
+            repository(owner: $owner, name: $name) {
+                name
+                diskUsage
+                isPrivate
+                owner {
+                    login
+                }
+                object(expression: "HEAD:") {
+                    ... on Tree {
+                        entries {
+                            name
+                            type
+                            extension
                         }
                     }
                 }
             }
-        `;
+        }
+    `;
 
-    let ymlContent;
     try {
-        const data = await githubGraphQLRequest(query, {owner, name: repoName}, GITHUB_TOKEN);
+        const data = await githubGraphQLRequest(query, { owner, name: repoName }, GITHUB_TOKEN);
         const repo = data.repository;
 
         if (!repo) {
             throw new Error(`Repository ${owner}/${repoName} not found`);
         }
 
-        // Find any YAML file in the entire repository using search
-        try {
-            ymlContent = await getOneYamlFile(owner, repoName)
-        } catch (error) {
-            console.info('Error fetching YML file:', error);
-            ymlContent = 'Unable to fetch YML file';
-        }
-
-
-        // Get total file count using search
-        const totalFiles = await getTotalFileCountWithREST(owner, repoName);
-
-        // Fetch active webhooks using REST API (GraphQL doesn't expose webhooks)
-        let activeWebhooks = [];
-        try {
-            const webhooksRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/hooks`, {
+        // Run all secondary fetches in parallel
+        const [ymlContentResult, totalFilesResult, activeWebhooksResult] = await Promise.all([
+            getOneYamlFile(owner, repoName).catch(error => {
+                console.info('Error fetching YML file:', error);
+                return 'Unable to fetch YML file';
+            }),
+            getTotalFileCountWithREST(owner, repoName).catch(error => {
+                console.error('Error fetching file count:', error);
+                return 0;
+            }),
+            fetch(`https://api.github.com/repos/${owner}/${repoName}/hooks`, {
                 headers: {
                     'Authorization': `token ${GITHUB_TOKEN}`,
                     'User-Agent': 'Apollo-GraphQL-Server',
                     'Accept': 'application/vnd.github.v3+json'
                 }
-            });
-
-            if (webhooksRes.ok) {
-                const webhooks = await webhooksRes.json();
-                activeWebhooks = webhooks
-                    .filter(hook => hook.active)
-                    .map(hook => `${hook.name} - ${hook.config?.url || 'No URL'}`);
-            }
-        } catch (error) {
-            console.error('Error fetching webhooks:', error);
-            activeWebhooks = ['Unable to fetch webhook information'];
-        }
+            })
+                .then(res => res.ok ? res.json() : [])
+                .then(webhooks =>
+                    (webhooks || [])
+                        .filter(hook => hook.active)
+                        .map(hook => `${hook.name} - ${hook.config?.url || 'No URL'}`)
+                )
+                .catch(error => {
+                    console.error('Error fetching webhooks:', error);
+                    return ['Unable to fetch webhook information'];
+                })
+        ]);
 
         return {
             name: repo.name,
             size: repo.diskUsage ?? 0,
             owner: repo.owner.login,
             isPrivate: repo.isPrivate,
-            numberOfFiles: totalFiles,
-            ymlContent,
-            activeWebhooks
+            numberOfFiles: totalFilesResult,
+            ymlContent: ymlContentResult,
+            activeWebhooks: activeWebhooksResult
         };
     } catch (error) {
         console.error(`Error fetching details for ${owner}/${repoName}:`, error);
@@ -133,7 +127,8 @@ async function fetchRepoDetailsInternal(owner, repoName) {
     }
 }
 
-async function getOneYamlFile(owner, repoName) {
+
+const getOneYamlFile = async (owner, repoName) => {
     const treeUrl = `https://api.github.com/repos/${owner}/${repoName}/git/trees/HEAD?recursive=1`;
 
     try {
@@ -152,7 +147,6 @@ async function getOneYamlFile(owner, repoName) {
 
         }
 
-        // Fetch raw content
         const rawUrl = `https://raw.githubusercontent.com/${owner}/${repoName}/HEAD/${yamlFile.path}`;
 
         const contentRes = await fetch(rawUrl, {
@@ -178,7 +172,7 @@ async function getOneYamlFile(owner, repoName) {
     }
 }
 
-async function getTotalFileCountWithREST(owner, repoName) {
+const getTotalFileCountWithREST= async (owner, repoName) => {
     const url = `https://api.github.com/repos/${owner}/${repoName}/git/trees/HEAD?recursive=1`;
 
     try {

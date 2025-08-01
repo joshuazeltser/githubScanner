@@ -15,5 +15,8 @@
     "async": "^3.2.6",
     "graphql": "^16.11.0",
     "p-limit": "^6.2.0"
+  },
+  "devDependencies": {
+    "globals": "^16.3.0"
   }
 }

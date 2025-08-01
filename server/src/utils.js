@@ -30,7 +30,7 @@ const githubGraphQLRequest = async (query, variables = {}, githubToken) => {
     }
 };
 
-async function githubRestRequest(url, githubToken) {
+const githubRestRequest = async (url, githubToken) => {
     try {
         const res = await fetch(url, {
             headers: {
