@@ -110,11 +110,13 @@ query {
 ```graphql
 query {
   repoDetails(owner: "your-username", name: "repo-name") {
-    name
-    isPrivate
-    numberOfFiles
-    ymlContent
-    activeWebhooks
+      name
+      size
+      owner
+      isPrivate
+      numberOfFiles
+      ymlContent
+      activeWebhooks
   }
 }
 ```

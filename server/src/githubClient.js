@@ -1,48 +1,16 @@
-const { ApolloServer } = require('@apollo/server');
-const { startStandaloneServer } = require('@apollo/server/standalone');
-const { typeDefs } = require('./schema');
-const async = require('async');
+const {githubRestRequest, githubGraphQLRequest} = require("./utils");
+const {queue} = require("async/index");
 
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const GITHUB_USERNAME = process.env.GITHUB_USERNAME;
-const GITHUB_API_URL = 'https://api.github.com/graphql';
-
-// Rate limiting queue with max 2 concurrent operations
-const repoDetailsQueue = async.queue(async (task) => {
-    return await fetchRepoDetailsInternal(task.owner, task.repoName);
-}, 2);
-
-const resolvers = {
-    Query: {
-        repositories: async () => {
-            return await listRepositories();
-        },
-        repoDetails: async (_, { owner, name }) => {
-            return await fetchRepoDetails(owner, name);
-        },
-    }
-};
-
-const startServer = async () => {
-    const server = new ApolloServer({
-        typeDefs,
-        resolvers,
-    });
-
-    const { url } = await startStandaloneServer(server, {
-        listen: { port: 4000 },
-    });
-
-    console.log(`🚀 Server ready at ${url}`);
-};
-
-startServer();
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const MAX_CONCURRENT_FETCH_DETAILS = 2
+const MAX_LIST_REPOS = 100
 
 const listRepositories = async () => {
     const query = `
         query {
             user(login: "${GITHUB_USERNAME}") {
-                repositories(first: 100) {
+                repositories(first: ${MAX_LIST_REPOS}) {
                     nodes {
                         name
                         diskUsage
@@ -56,7 +24,7 @@ const listRepositories = async () => {
     `;
 
     try {
-        const data = await githubGraphQLRequest(query);
+        const data = await githubGraphQLRequest(query, {}, GITHUB_TOKEN);
         return data.user.repositories.nodes.map(repo => ({
             name: repo.name,
             size: repo.diskUsage ?? 0,
@@ -67,6 +35,12 @@ const listRepositories = async () => {
         throw new Error('Failed to fetch repositories');
     }
 };
+
+
+// Rate limiting queue with max 2 concurrent operations
+const repoDetailsQueue = queue(async (task) => {
+    return await fetchRepoDetailsInternal(task.owner, task.repoName);
+}, MAX_CONCURRENT_FETCH_DETAILS);
 
 async function fetchRepoDetails(owner, repoName) {
     // Use async queue for rate limiting
@@ -103,7 +77,7 @@ async function fetchRepoDetailsInternal(owner, repoName) {
 
     let ymlContent;
     try {
-        const data = await githubGraphQLRequest(query, {owner, name: repoName});
+        const data = await githubGraphQLRequest(query, {owner, name: repoName}, GITHUB_TOKEN);
         const repo = data.repository;
 
         if (!repo) {
@@ -163,19 +137,8 @@ async function getOneYamlFile(owner, repoName) {
     const treeUrl = `https://api.github.com/repos/${owner}/${repoName}/git/trees/HEAD?recursive=1`;
 
     try {
-        const res = await fetch(treeUrl, {
-            headers: {
-                'Authorization': `token ${GITHUB_TOKEN}`,
-                'User-Agent': 'Apollo-GraphQL-Server',
-                'Accept': 'application/vnd.github.v3+json'
-            }
-        });
 
-        if (!res.ok) {
-            throw new Error(`Failed to fetch repo tree: ${res.status}`);
-        }
-
-        const data = await res.json();
+        const data = await githubRestRequest(treeUrl, GITHUB_TOKEN)
         const tree = data.tree || [];
 
         // Find first YAML file
@@ -205,10 +168,7 @@ async function getOneYamlFile(owner, repoName) {
                 content: `Unable to fetch YML file - status ${contentRes.status}`
             };
         }
-
-        const content = await contentRes.text();
-
-        return content;
+        return await contentRes.text();
     } catch (error) {
         console.error('Error retrieving YAML file:', error);
         return {
@@ -218,64 +178,18 @@ async function getOneYamlFile(owner, repoName) {
     }
 }
 
-
-
 async function getTotalFileCountWithREST(owner, repoName) {
     const url = `https://api.github.com/repos/${owner}/${repoName}/git/trees/HEAD?recursive=1`;
 
     try {
-        const res = await fetch(url, {
-            headers: {
-                'Authorization': `token ${GITHUB_TOKEN}`,
-                'User-Agent': 'Apollo-GraphQL-Server',
-                'Accept': 'application/vnd.github.v3+json'
-            }
-        });
-
-        if (!res.ok) {
-            throw new Error(`Failed to fetch file tree: ${res.status}`);
-        }
-
-        const data = await res.json();
+        const data = await githubRestRequest(url, GITHUB_TOKEN)
         if (!data.tree) return 0;
 
-        const fileCount = data.tree.filter(entry => entry.type === 'blob').length;
-        return fileCount;
+        return data.tree.filter(entry => entry.type === 'blob').length;
     } catch (error) {
         console.error('Error fetching total file count (REST):', error);
         return 0;
     }
 }
 
-
-
-
-const githubGraphQLRequest = async (query, variables = {}) => {
-    try {
-        const res = await fetch(GITHUB_API_URL, {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${GITHUB_TOKEN}`,
-                'Content-Type': 'application/json',
-                'User-Agent': 'Apollo-GraphQL-Server'
-            },
-            body: JSON.stringify({ query, variables }),
-        });
-
-        if (!res.ok) {
-            throw new Error(`HTTP error! status: ${res.status}`);
-        }
-
-        const data = await res.json();
-
-        if (data.errors) {
-            console.error('GraphQL errors:', data.errors);
-            throw new Error(`GraphQL errors: ${JSON.stringify(data.errors)}`);
-        }
-
-        return data.data;
-    } catch (error) {
-        console.error('GitHub GraphQL request failed:', error);
-        throw error;
-    }
-};
+module.exports = {listRepositories, fetchRepoDetails}
